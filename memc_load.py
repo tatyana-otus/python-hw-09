@@ -7,15 +7,26 @@ import glob
 import logging
 import collections
 from optparse import OptionParser
-# brew install protobuf
-# protoc  --python_out=. ./appsinstalled.proto
-# pip install protobuf
 import appsinstalled_pb2
-# pip install python-memcached
 import memcache
+from multiprocessing import Process, Queue
+import time
+
 
 NORMAL_ERR_RATE = 0.01
-AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"])
+AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "raw_apps"])
+
+CONVERT_FRAME_SIZE = 1024
+UPLOAD_FRAME_SIZE = 1024
+
+CONVERT_QUEUE_MAXSIZE = 32
+UPLOAD_QUEUE_MAXSIZE = 64
+
+UPLOADERS = 1
+
+MEMCACHE_SOCKET_TIMEOUT = 1
+MEMCACHE_RETRY = 0
+MEMCACHE_RETRY_TIMEOUT = 0
 
 
 def dot_rename(path):
@@ -24,28 +35,7 @@ def dot_rename(path):
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
-    ua = appsinstalled_pb2.UserApps()
-    ua.lat = appsinstalled.lat
-    ua.lon = appsinstalled.lon
-    key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
-    ua.apps.extend(appsinstalled.apps)
-    packed = ua.SerializeToString()
-    # @TODO persistent connection
-    # @TODO retry and timeouts!
-    try:
-        if dry_run:
-            logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
-        else:
-            memc = memcache.Client([memc_addr])
-            memc.set(key, packed)
-    except Exception, e:
-        logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
-        return False
-    return True
-
-
-def parse_appsinstalled(line):
+def parse_raw_appsinstalled(line):
     line_parts = line.strip().split("\t")
     if len(line_parts) < 5:
         return
@@ -53,58 +43,151 @@ def parse_appsinstalled(line):
     if not dev_type or not dev_id:
         return
     try:
-        apps = [int(a.strip()) for a in raw_apps.split(",")]
-    except ValueError:
-        apps = [int(a.strip()) for a in raw_apps.split(",") if a.isidigit()]
-        logging.info("Not all user apps are digits: `%s`" % line)
-    try:
         lat, lon = float(lat), float(lon)
     except ValueError:
         logging.info("Invalid geo coords: `%s`" % line)
-    return AppsInstalled(dev_type, dev_id, lat, lon, apps)
+    return AppsInstalled(dev_type, dev_id, lat, lon, raw_apps)
 
 
-def main(options):
-    device_memc = {
-        "idfa": options.idfa,
-        "gaid": options.gaid,
-        "adid": options.adid,
-        "dvid": options.dvid,
-    }
-    for fn in glob.iglob(options.pattern):
+def get_statistics(statistic_queue, count):
+    errors = processed = 0
+    for i in range(count):
+        e, p = statistic_queue.get()
+        errors = errors + e
+        processed = processed + p
+    return (errors, processed)
+
+
+def uploader(th_id, memc_addr, q, stat_q, dry_run=False):
+        logging.debug("Uploader {} started, memc_addr = {}".format(th_id, memc_addr))
         processed = errors = 0
-        logging.info('Processing %s' % fn)
-        fd = gzip.open(fn)
-        for line in fd:
-            line = line.strip()
-            if not line:
-                continue
-            appsinstalled = parse_appsinstalled(line)
-            if not appsinstalled:
-                errors += 1
-                continue
-            memc_addr = device_memc.get(appsinstalled.dev_type)
-            if not memc_addr:
-                errors += 1
-                logging.error("Unknow device type: %s" % appsinstalled.dev_type)
-                continue
-            ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
-            if ok:
-                processed += 1
-            else:
-                errors += 1
-        if not processed:
-            fd.close()
-            dot_rename(fn)
-            continue
+        memc = memcache.Client([memc_addr], socket_timeout=MEMCACHE_SOCKET_TIMEOUT)
+        while True:
+            message = q.get()
+            if message == "quit":
+                stat_q.put((errors, processed))
+                break
+            for key, packed in message:
+                try:
+                    if dry_run:
+                        logging.debug("%s - %s -> %s" % (memc_addr, key, str(packed).replace("\n", " ")))
+                    else:
+                        attempts = MEMCACHE_RETRY
+                        while not memc.set(key, packed):
+                            time.sleep(MEMCACHE_RETRY_TIMEOUT)
+                            attempts -= 1
+                            if attempts <= 0:
+                                raise ConnectionError
+                    processed = processed + 1
+                except Exception as e:
+                    errors = errors + 1
+                    logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
 
+
+def converter(th_id, memc_addr, q, converter_stat_q, dry_run=False):
+        logging.debug("Converter {} started, memc_addr = {}".format(th_id, memc_addr))
+        mc_q = Queue(maxsize=UPLOAD_QUEUE_MAXSIZE)
+        loaders_stat_q = Queue(maxsize=UPLOADERS)
+        loaders = []
+        for idx in range(UPLOADERS):
+            th = Process(target=uploader, args=(idx, memc_addr, mc_q, loaders_stat_q, dry_run))
+            th.start()
+            loaders.append(th)
+        mc_m = []
+        while True:
+            message = q.get()
+            if message == "quit":
+                break
+            for appsinstalled in message:
+                try:
+                    apps = [int(a.strip()) for a in appsinstalled.raw_apps.split(",")]
+                except ValueError:
+                    apps = [int(a.strip()) for a in appsinstalled.raw_apps.split(",") if a.isidigit()]
+                    logging.info("Not all user apps are digits: `%s`" % line)
+                ua = appsinstalled_pb2.UserApps()
+                ua.lat = appsinstalled.lat
+                ua.lon = appsinstalled.lon
+                key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
+                ua.apps.extend(apps)
+                packed = ua.SerializeToString()
+                mc_m.append((key, packed))
+                if len(mc_m) == UPLOAD_FRAME_SIZE:
+                    mc_q.put(mc_m)
+                    mc_m = []
+        if mc_m:
+            mc_q.put(mc_m)
+        for th in loaders:
+            mc_q.put("quit")
+            th.join
+        converter_stat_q.put(get_statistics(loaders_stat_q, UPLOADERS))
+
+
+class Reader():
+    ConverterInfo = collections.namedtuple("ConverterInfod", ["memc_addr", "queue"])
+
+    def __init__(self, options):
+        self.pattern = options.pattern
+        self.dry = options.dry
+        self.stat_q = Queue(maxsize=4)
+        self.info = {"idfa": self.ConverterInfo(options.idfa, Queue(maxsize=UPLOAD_QUEUE_MAXSIZE)),
+                     "gaid": self.ConverterInfo(options.gaid, Queue(maxsize=UPLOAD_QUEUE_MAXSIZE)),
+                     "adid": self.ConverterInfo(options.adid, Queue(maxsize=UPLOAD_QUEUE_MAXSIZE)),
+                     "dvid": self.ConverterInfo(options.dvid, Queue(maxsize=UPLOAD_QUEUE_MAXSIZE))}
+
+    def mc_process(self):
+        for fn in glob.iglob(self.pattern):
+            logging.info('Processing %s' % fn)
+            errors, processed = self.file_process(fn)
+            self.finalize_file_process(fn, processed, errors)
+
+    def file_process(self, fn):
+        queue_frame = {"idfa": [], "gaid": [], "adid": [], "dvid": []}
+        errors = processed = 0
+        count = 0
+        converters = []
+        for dev_id in self.info:
+            th = Process(target=converter, args=(count, self.info[dev_id].memc_addr,
+                                                 self.info[dev_id].queue, self.stat_q, self.dry))
+            th.start()
+            converters.append(th)
+            count = count + 1
+        with gzip.open(fn, 'rt', encoding='utf-8') as fd:
+            for line in fd:
+                line = line.strip()
+                if not line:
+                    continue
+                appsinstalled = parse_raw_appsinstalled(line)
+                if not appsinstalled:
+                    errors += 1
+                    continue
+                conv_info = self.info.get(appsinstalled.dev_type)
+                if not conv_info:
+                    errors += 1
+                    logging.error("Unknow device type: %s" % appsinstalled.dev_type)
+                    continue
+                queue_frame[appsinstalled.dev_type].append(appsinstalled)
+                if len(queue_frame[appsinstalled.dev_type]) == CONVERT_FRAME_SIZE:
+                    conv_info.queue.put(queue_frame[appsinstalled.dev_type])
+                    queue_frame[appsinstalled.dev_type] = []
+        for dev_id in self.info:
+            if queue_frame[dev_id]:
+                self.info[dev_id].queue.put(queue_frame[dev_id])
+            self.info[dev_id].queue.put("quit")
+        for th in converters:
+            th.join()
+        e, p = get_statistics(self.stat_q, 4)
+        return errors + e, processed + p
+
+    def finalize_file_process(self, fn, processed, errors):
+        dot_rename(fn)
+        logging.info("errors = {} processed = {}".format(errors, processed))
+        if not processed:
+            return
         err_rate = float(errors) / processed
         if err_rate < NORMAL_ERR_RATE:
             logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
         else:
             logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
-        fd.close()
-        dot_rename(fn)
 
 
 def prototest():
@@ -142,7 +225,8 @@ if __name__ == '__main__':
 
     logging.info("Memc loader started with options: %s" % opts)
     try:
-        main(opts)
-    except Exception, e:
+        r = Reader(opts)
+        r.mc_process()
+    except Exception as e:
         logging.exception("Unexpected error: %s" % e)
         sys.exit(1)
