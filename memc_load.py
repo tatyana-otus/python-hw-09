@@ -67,6 +67,23 @@ def uploader(th_id, memc_addr, q, stat_q, dry_run=False):
             if message == "quit":
                 stat_q.put((errors, processed))
                 break
+
+            # attempts = MEMCACHE_RETRY
+            # try:
+            #     while True:
+            #         notset_keys = memc.set_multi(message)
+            #         if len(notset_keys) == 0:
+            #             break
+            #         time.sleep(MEMCACHE_RETRY_TIMEOUT)
+            #         attempts -= 1
+            #         if attempts <= 0:
+            #             raise ConnectionError
+
+            #     processed = processed + len(message)
+            # except Exception as e:
+            #     errors = errors + len(message)
+            #     logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
+
             for key, packed in message:
                 try:
                     if dry_run:
@@ -111,6 +128,7 @@ def converter(th_id, memc_addr, q, converter_stat_q, dry_run=False):
                 ua.apps.extend(apps)
                 packed = ua.SerializeToString()
                 mc_m.append((key, packed))
+                # mc_m[key] = packed
                 if len(mc_m) == UPLOAD_FRAME_SIZE:
                     mc_q.put(mc_m)
                     mc_m = []

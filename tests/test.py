@@ -65,6 +65,14 @@ class TestMemcacheOK(unittest.TestCase):
         self.assertEqual(processed, self.expected_processed)
         self.check_integrity(opts['pattern'])
 
+        errors, processed = reader.file_process(opts['pattern'])
+        self.assertEqual(errors, self.expected_errors)
+        self.assertEqual(processed, self.expected_processed)
+
+        errors, processed = reader.file_process(opts['pattern'])
+        self.assertEqual(errors, self.expected_errors)
+        self.assertEqual(processed, self.expected_processed)
+
     def test_ok_4_loaders(self):
         mcl.CONVERT_FRAME_SIZE = 1024
         mcl.UPLOAD_FRAME_SIZE = 1024
