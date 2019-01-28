@@ -16,6 +16,10 @@ opts = {'dry': False,
         'gaid': '127.0.0.1:33014',
         'idfa': '127.0.0.1:33013'}
 
+test_mc_cfg = {"MEMCACHE_SOCKET_TIMEOUT": 1,
+               "MEMCACHE_RETRY": 0,
+               "MEMCACHE_RETRY_TIMEOUT": 0}
+
 
 class TestMemcacheOK(unittest.TestCase):
     expected_errors = 0
@@ -59,7 +63,7 @@ class TestMemcacheOK(unittest.TestCase):
         mcl.CONVERT_QUEUE_MAXSIZE = 32
         mcl.UPLOAD_QUEUE_MAXSIZE = 64
         mcl.UPLOADERS = 1
-        reader = mcl.Reader(optparse.Values(opts))
+        reader = mcl.Reader(optparse.Values(opts), test_mc_cfg)
         errors, processed = reader.file_process(opts['pattern'])
         self.assertEqual(errors, self.expected_errors)
         self.assertEqual(processed, self.expected_processed)
@@ -79,7 +83,7 @@ class TestMemcacheOK(unittest.TestCase):
         mcl.CONVERT_QUEUE_MAXSIZE = 32
         mcl.UPLOAD_QUEUE_MAXSIZE = 64
         mcl.UPLOADERS = 4
-        reader = mcl.Reader(optparse.Values(opts))
+        reader = mcl.Reader(optparse.Values(opts), test_mc_cfg)
         errors, processed = reader.file_process(opts['pattern'])
         self.assertEqual(errors, self.expected_errors, processed)
         self.assertEqual(processed, self.expected_processed, errors)
@@ -91,7 +95,7 @@ class TestMemcacheOK(unittest.TestCase):
         mcl.CONVERT_QUEUE_MAXSIZE = 32
         mcl.UPLOAD_QUEUE_MAXSIZE = 64
         mcl.UPLOADERS = 1
-        reader = mcl.Reader(optparse.Values(opts))
+        reader = mcl.Reader(optparse.Values(opts), test_mc_cfg)
         errors, processed = reader.file_process(opts['pattern'])
         self.assertEqual(errors, self.expected_errors, processed)
         self.assertEqual(processed, self.expected_processed, errors)
@@ -117,7 +121,7 @@ class TestMemcacheNotOK(unittest.TestCase):
         mcl.CONVERT_QUEUE_MAXSIZE = 32
         mcl.UPLOAD_QUEUE_MAXSIZE = 64
         mcl.UPLOADERS = 1
-        reader = mcl.Reader(optparse.Values(opts))
+        reader = mcl.Reader(optparse.Values(opts), test_mc_cfg)
         errors, processed = reader.file_process(opts['pattern'])
         self.assertEqual(errors, self.expected_errors, processed)
         self.assertEqual(processed, self.expected_processed, errors)
@@ -128,7 +132,7 @@ class TestMemcacheNotOK(unittest.TestCase):
         mcl.CONVERT_QUEUE_MAXSIZE = 32
         mcl.UPLOAD_QUEUE_MAXSIZE = 64
         mcl.UPLOADERS = 4
-        reader = mcl.Reader(optparse.Values(opts))
+        reader = mcl.Reader(optparse.Values(opts), test_mc_cfg)
         errors, processed = reader.file_process(opts['pattern'])
         self.assertEqual(errors, self.expected_errors, processed)
         self.assertEqual(processed, self.expected_processed, errors)
@@ -139,7 +143,7 @@ class TestMemcacheNotOK(unittest.TestCase):
         mcl.CONVERT_QUEUE_MAXSIZE = 32
         mcl.UPLOAD_QUEUE_MAXSIZE = 64
         mcl.UPLOADERS = 1
-        reader = mcl.Reader(optparse.Values(opts))
+        reader = mcl.Reader(optparse.Values(opts), test_mc_cfg)
         errors, processed = reader.file_process(opts['pattern'])
         self.assertEqual(errors, self.expected_errors, processed)
         self.assertEqual(processed, self.expected_processed, errors)
