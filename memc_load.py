@@ -62,6 +62,19 @@ def get_statistics(statistic_queue, count):
     return (errors, processed)
 
 
+def serialize_apps(appsinstalled):
+    try:
+        apps = [int(a.strip()) for a in appsinstalled.raw_apps.split(",")]
+    except ValueError:
+        apps = [int(a.strip()) for a in appsinstalled.raw_apps.split(",") if a.isidigit()]
+        logging.info("Not all user apps are digits: `%s`" % line)
+    ua = appsinstalled_pb2.UserApps()
+    ua.lat = appsinstalled.lat
+    ua.lon = appsinstalled.lon
+    ua.apps.extend(apps)
+    return ua.SerializeToString()
+
+
 def uploader(th_id, memc_addr, q, stat_q, mc_cfg, dry_run=False):
         logging.debug("Uploader {} started, memc_addr = {}".format(th_id, memc_addr))
         processed = errors = 0
@@ -107,18 +120,8 @@ def converter(th_id, memc_addr, q, converter_stat_q, mc_cfg, dry_run=False):
             if message == "quit":
                 break
             for appsinstalled in message:
-                try:
-                    apps = [int(a.strip()) for a in appsinstalled.raw_apps.split(",")]
-                except ValueError:
-                    apps = [int(a.strip()) for a in appsinstalled.raw_apps.split(",") if a.isidigit()]
-                    logging.info("Not all user apps are digits: `%s`" % line)
-                ua = appsinstalled_pb2.UserApps()
-                ua.lat = appsinstalled.lat
-                ua.lon = appsinstalled.lon
                 key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
-                ua.apps.extend(apps)
-                packed = ua.SerializeToString()
-                mc_m[key] = packed
+                mc_m[key] = serialize_apps(appsinstalled)
                 if len(mc_m) == UPLOAD_FRAME_SIZE:
                     mc_q.put(mc_m)
                     mc_m = {}
